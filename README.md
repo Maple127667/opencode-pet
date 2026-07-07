@@ -61,19 +61,19 @@ git clone https://github.com/Maple127667/opencode-pet.git
 ["file:/path/to/other-plugin", "file:/path/to/opencode-pet"]
 ```
 
-### 2. 预处理白底 GIF（一次性）
-
-仓库中部分 GIF 原本是白底，需要用预处理脚本做 flood-fill 抠图，转为透明 GIF：
-
-```bash
-python preprocess_gifs.py
-```
-
-原始文件会备份为 `*-orig.gif`。脚本每次都从备份恢复再处理，所以可以反复调整 `WHITE_TOL` 后重跑。
-
-### 3. 重启 opencode
+### 2. 重启 opencode
 
 桌宠会在屏幕右下角出现。发一条消息，猫会跑进来、审视、说话时跑动，完成后挥手庆祝。
+
+> **可选：更换或调整 GIF**
+>
+> 仓库中的 GIF 已经预处理过（白底抠成透明）。如果你想替换 GIF 素材或调整抠图阈值，把新的白底 GIF 放进 `gifs/` 目录，然后跑：
+>
+> ```bash
+> python preprocess_gifs.py
+> ```
+>
+> 脚本会从 `-orig.gif` 备份恢复原始白底，再用 flood-fill 算法重新抠图。原始文件始终保留为 `*-orig.gif`。
 
 ## 配置
 
