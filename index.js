@@ -101,6 +101,10 @@ const tui = async (api) => {
   let currentActivity = "idle";  // "idle" | "thinking" | "speaking" | "tool"
   let lastPollStatus = "idle";
   let pendingIdle = false;       // status:idle held back while activity != "idle"
+  // Track whether the session is logically busy — independent of pendingIdle.
+  // Celebrate fires ONLY on the real busy→idle transition, not on every
+  // single assistant message completion (agent loops produce many).
+  let sessionBusy = false;
 
   const STALL_TIMEOUT_MS = 60000;  // only a safety net, not the main timer
 
@@ -112,14 +116,26 @@ const tui = async (api) => {
   };
 
   // Centralized status sender.
-  // While activity != "idle", idle is held back so the pet doesn't flicker
-  // to waiting.gif during long reasoning/text pauses.
+  // - busy: marks sessionBusy=true
+  // - idle: held back if activity != idle; otherwise fires celebrate on
+  //        busy→idle transition, then sends status:idle.
   const sendStatus = (v) => {
-    if (v === "idle" && currentActivity !== "idle") {
-      pendingIdle = true;
+    if (v === "busy") {
+      sessionBusy = true;
+      send({ type: "status", value: "busy" });
       return;
     }
-    send({ type: "status", value: v });
+    if (v === "idle") {
+      if (currentActivity !== "idle") {
+        pendingIdle = true;
+        return;
+      }
+      if (sessionBusy) {
+        sessionBusy = false;
+        send({ type: "flash", value: "celebrate", duration: 5000 });
+      }
+      send({ type: "status", value: "idle" });
+    }
   };
 
   const poke = (ms = 2500) => {
@@ -271,19 +287,17 @@ const tui = async (api) => {
   });
 
   // =====================================================================
-  // Message completion — fires celebrate flash + clears activity channel
-  // This is the ONLY place celebrate is triggered, so it never gets lost
-  // due to status-hold or timer races.
+  // Message completion — clears activity channel + tracks cost.
+  // Does NOT fire celebrate — that's reserved for the session busy→idle
+  // transition so multi-turn agent loops don't wave between every step.
   // =====================================================================
   on("message.updated", (e) => {
     const msg = e?.properties?.info || e?.properties;
     if (!msg) return;
     if (msg.role === "assistant" && msg.time?.completed) {
-      // clear stall timer + activity channel
+      // clear stall timer + activity channel only
       if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
       setActivity("idle");
-      // celebrate flash — fires HERE, unconditionally on assistant completion
-      send({ type: "flash", value: "celebrate", duration: 5000 });
       const cost = Number(msg.cost) || 0;
       const tok = msg.tokens || {};
       totalCost += cost;
