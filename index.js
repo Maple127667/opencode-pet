@@ -105,6 +105,8 @@ const tui = async (api) => {
   // Celebrate + cost bubble fire ONLY on the real busy→idle transition,
   // not on every single assistant message completion (agent loops produce many).
   let sessionBusy = false;
+  let busySince = 0;             // timestamp when busy started (for duration)
+  let activeSessionID = null;    // tracked from session.status events
   // Per-task cost/token accumulator — reset on busy, flushed on idle.
   let taskCost = 0;
   let taskTokens = { input: 0, output: 0, reasoning: 0 };
@@ -118,13 +120,38 @@ const tui = async (api) => {
     tool:      "tool",
   };
 
+  // Human-readable duration formatter: 125000 ms → "2m 5s"
+  const fmtDuration = (ms) => {
+    const total = Math.floor(ms / 1000);
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    if (m <= 0) return `${s}s`;
+    return `${m}m ${s}s`;
+  };
+
+  // Fetch the title of the active session (best-effort, never throws).
+  // Falls back to "Task" if session info is unavailable.
+  const fetchSessionTitle = async () => {
+    if (!activeSessionID) return "Task";
+    try {
+      const result = await api.client.session.list();
+      const data = result?.data;
+      if (Array.isArray(data)) {
+        const sess = data.find((s) => s?.id === activeSessionID);
+        if (sess?.title) return sess.title;
+      }
+    } catch {}
+    return "Task";
+  };
+
   // Centralized status sender.
-  // - busy: marks sessionBusy=true, resets per-task cost accumulator
+  // - busy: marks sessionBusy=true, records start time, resets per-task cost
   // - idle: held back if activity != idle; otherwise fires celebrate +
-  //        cost bubble on busy→idle transition, then sends status:idle.
+  //        cost+duration bubble on busy→idle transition, then sends status:idle.
   const sendStatus = (v) => {
     if (v === "busy") {
       sessionBusy = true;
+      busySince = Date.now();
       taskCost = 0;
       taskTokens = { input: 0, output: 0, reasoning: 0 };
       send({ type: "status", value: "busy" });
@@ -138,11 +165,15 @@ const tui = async (api) => {
       if (sessionBusy) {
         sessionBusy = false;
         send({ type: "flash", value: "celebrate", duration: 5000 });
-        // Cost bubble — only on full task completion
+        // Fire task-completion bubble asynchronously (need session title fetch).
+        const durationMs = Date.now() - busySince;
         const sTok = taskTokens.input + taskTokens.output + taskTokens.reasoning;
-        if (taskCost > 0 || sTok > 0) {
-          send({ type: "bubble", text: `💰 $${taskCost.toFixed(4)} · today $${totalCost.toFixed(2)} · 🧠 ${(sTok/1000).toFixed(1)}k`, duration: 10000 });
-        }
+        const totalTok = totalTokens.input + totalTokens.output + totalTokens.reasoning;
+        (async () => {
+          const title = await fetchSessionTitle();
+          const line = `✅ ${title} · ⏱ ${fmtDuration(durationMs)} · 🧠 ${(totalTok/1000).toFixed(1)}k`;
+          send({ type: "bubble", text: line, duration: 10000 });
+        })();
       }
       send({ type: "status", value: "idle" });
     }
@@ -184,7 +215,9 @@ const tui = async (api) => {
   on("session.status", (e) => {
     const status = e?.properties?.status;
     const type = status?.type;
-    log("info", `session.status.type=${type}`);
+    const sid = e?.properties?.sessionID;
+    if (sid) activeSessionID = sid;
+    log("info", `session.status.type=${type} sid=${sid || "-"}`);
     if (type === "busy") {
       sendStatus("busy");
       poke(10000);
