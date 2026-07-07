@@ -150,10 +150,16 @@ const tui = async (api) => {
   //        cost+duration bubble on busy→idle transition, then sends status:idle.
   const sendStatus = (v) => {
     if (v === "busy") {
+      // Only capture the start timestamp and reset accumulators on the
+      // false→true transition. opencode sends multiple busy events during
+      // a single task; resetting each time would lose prior accumulators
+      // and make the reported duration far too short.
+      if (!sessionBusy) {
+        busySince = Date.now();
+        taskCost = 0;
+        taskTokens = { input: 0, output: 0, reasoning: 0 };
+      }
       sessionBusy = true;
-      busySince = Date.now();
-      taskCost = 0;
-      taskTokens = { input: 0, output: 0, reasoning: 0 };
       send({ type: "status", value: "busy" });
       return;
     }
