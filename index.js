@@ -102,9 +102,12 @@ const tui = async (api) => {
   let lastPollStatus = "idle";
   let pendingIdle = false;       // status:idle held back while activity != "idle"
   // Track whether the session is logically busy — independent of pendingIdle.
-  // Celebrate fires ONLY on the real busy→idle transition, not on every
-  // single assistant message completion (agent loops produce many).
+  // Celebrate + cost bubble fire ONLY on the real busy→idle transition,
+  // not on every single assistant message completion (agent loops produce many).
   let sessionBusy = false;
+  // Per-task cost/token accumulator — reset on busy, flushed on idle.
+  let taskCost = 0;
+  let taskTokens = { input: 0, output: 0, reasoning: 0 };
 
   const STALL_TIMEOUT_MS = 60000;  // only a safety net, not the main timer
 
@@ -116,12 +119,14 @@ const tui = async (api) => {
   };
 
   // Centralized status sender.
-  // - busy: marks sessionBusy=true
-  // - idle: held back if activity != idle; otherwise fires celebrate on
-  //        busy→idle transition, then sends status:idle.
+  // - busy: marks sessionBusy=true, resets per-task cost accumulator
+  // - idle: held back if activity != idle; otherwise fires celebrate +
+  //        cost bubble on busy→idle transition, then sends status:idle.
   const sendStatus = (v) => {
     if (v === "busy") {
       sessionBusy = true;
+      taskCost = 0;
+      taskTokens = { input: 0, output: 0, reasoning: 0 };
       send({ type: "status", value: "busy" });
       return;
     }
@@ -133,6 +138,11 @@ const tui = async (api) => {
       if (sessionBusy) {
         sessionBusy = false;
         send({ type: "flash", value: "celebrate", duration: 5000 });
+        // Cost bubble — only on full task completion
+        const sTok = taskTokens.input + taskTokens.output + taskTokens.reasoning;
+        if (taskCost > 0 || sTok > 0) {
+          send({ type: "bubble", text: `💰 $${taskCost.toFixed(4)} · today $${totalCost.toFixed(2)} · 🧠 ${(sTok/1000).toFixed(1)}k`, duration: 10000 });
+        }
       }
       send({ type: "status", value: "idle" });
     }
@@ -287,9 +297,8 @@ const tui = async (api) => {
   });
 
   // =====================================================================
-  // Message completion — clears activity channel + tracks cost.
-  // Does NOT fire celebrate — that's reserved for the session busy→idle
-  // transition so multi-turn agent loops don't wave between every step.
+  // Message completion — clears activity channel + accumulates per-task cost.
+  // Does NOT fire celebrate or bubble — those fire on session busy→idle.
   // =====================================================================
   on("message.updated", (e) => {
     const msg = e?.properties?.info || e?.properties;
@@ -298,17 +307,19 @@ const tui = async (api) => {
       // clear stall timer + activity channel only
       if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
       setActivity("idle");
+      // accumulate per-task cost (flushed on session idle)
       const cost = Number(msg.cost) || 0;
       const tok = msg.tokens || {};
+      taskCost += cost;
+      taskTokens.input     += Number(tok.input) || 0;
+      taskTokens.output    += Number(tok.output) || 0;
+      taskTokens.reasoning += Number(tok.reasoning) || 0;
+      // persist running totals
       totalCost += cost;
       totalTokens.input     += Number(tok.input) || 0;
       totalTokens.output    += Number(tok.output) || 0;
       totalTokens.reasoning += Number(tok.reasoning) || 0;
       saveTotals();
-      const sTok = (tok.input||0) + (tok.output||0) + (tok.reasoning||0);
-      if (cost > 0 || sTok > 0) {
-        send({ type: "bubble", text: `💰 $${cost.toFixed(4)} · today $${totalCost.toFixed(2)} · 🧠 ${(sTok/1000).toFixed(1)}k`, duration: 10000 });
-      }
     }
   });
 
