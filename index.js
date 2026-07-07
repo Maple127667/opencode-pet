@@ -148,7 +148,10 @@ const tui = async (api) => {
   // - busy: marks sessionBusy=true, records start time, resets per-task cost
   // - idle: held back if activity != idle; otherwise fires celebrate +
   //        cost+duration bubble on busy→idle transition, then sends status:idle.
-  const sendStatus = (v) => {
+  //        `options.soft=true` skips celebrate (used by poke fallback, which
+  //        can fire mid-task when an agent step takes >10s).
+  const sendStatus = (v, options = {}) => {
+    const soft = options.soft === true;
     if (v === "busy") {
       // Only capture the start timestamp and reset accumulators on the
       // false→true transition. opencode sends multiple busy events during
@@ -168,12 +171,11 @@ const tui = async (api) => {
         pendingIdle = true;
         return;
       }
-      if (sessionBusy) {
+      if (sessionBusy && !soft) {
+        // Real session-idle — fire celebrate + bubble, reset task state.
         sessionBusy = false;
         send({ type: "flash", value: "celebrate", duration: 5000 });
-        // Fire task-completion bubble asynchronously (need session title fetch).
         const durationMs = Date.now() - busySince;
-        const sTok = taskTokens.input + taskTokens.output + taskTokens.reasoning;
         const totalTok = totalTokens.input + totalTokens.output + totalTokens.reasoning;
         (async () => {
           const title = await fetchSessionTitle();
@@ -181,6 +183,8 @@ const tui = async (api) => {
           send({ type: "bubble", text: line, duration: 10000 });
         })();
       }
+      // For soft idle (poke fallback) we DO NOT touch sessionBusy/busySince/
+      // taskCost — the task may still be running, just quiet between steps.
       send({ type: "status", value: "idle" });
     }
   };
@@ -188,7 +192,8 @@ const tui = async (api) => {
   const poke = (ms = 2500) => {
     if (busyTimer) clearTimeout(busyTimer);
     busyTimer = setTimeout(() => {
-      sendStatus("idle");
+      // Soft idle — fallback only; never triggers celebrate.
+      sendStatus("idle", { soft: true });
       busyTimer = null;
     }, ms);
   };
