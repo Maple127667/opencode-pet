@@ -17,10 +17,14 @@
 //   {"type":"quit"}
 
 import { appendFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 
-const PET_DIR = "D:\\Desktop\\code\\opencode-pet";
-const PET_PY  = `${PET_DIR}\\pet.py`;
-const LOG     = `${PET_DIR}\\probe.log`;
+// Resolve the pet directory relative to THIS file, so the plugin works
+// no matter where it's placed (plugins dir, project dir, or absolute path).
+const PET_DIR = path.dirname(fileURLToPath(import.meta.url));
+const PET_PY  = path.join(PET_DIR, "pet.py");
+const LOG     = path.join(PET_DIR, "probe.log");
 
 function log(kind, msg) {
   try { appendFileSync(LOG, `${new Date().toISOString()} [${kind}] ${msg}\n`); } catch {}
