@@ -131,6 +131,10 @@ CANVAS_W = 200
 CANVAS_H = 220
 TRANSPARENT = "#010101"
 
+# Ground offset from the bottom of the screen work area. Lifts the pet above
+# the Windows taskbar (typically 40-48 px; 60 gives some breathing room).
+FLOOR_MARGIN = 60
+
 PET_CX = CANVAS_W // 2
 PET_CY = 160
 
@@ -208,7 +212,9 @@ class PetWindow:
 
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         self.x = sw - CANVAS_W - 60
-        self.y = sh - CANVAS_H - 8   # ground level (matches FLOOR_MARGIN)
+        # Lift the pet above the Windows taskbar (typically 40-48 px tall).
+        # FLOOR_MARGIN is the gap from the bottom of the work area.
+        self.y = sh - CANVAS_H - self.FLOOR_MARGIN
         self.root.geometry(f"{CANVAS_W}x{CANVAS_H}+{self.x}+{self.y}")
 
         # Mark the window as "no-activate" so it NEVER steals keyboard focus.
@@ -259,7 +265,7 @@ class PetWindow:
         self.AIR_DRAG = 0.045      # per step — velocity bleed in flight (terminal velocity feel)
         self.BOUNCE = 0.30         # lower → fewer, lower bounces, stops faster
         self.FRICTION = 0.55       # per step — ground friction after landing
-        self.FLOOR_MARGIN = 8
+        self.FLOOR_MARGIN = FLOOR_MARGIN  # ground offset (taskbar clearance)
         self.PET_HEARTS_MS = 1500
         self.petted_until = 0.0
         self._last_phys_time = time.time()
@@ -543,7 +549,7 @@ class PetWindow:
     def jump_to_attention(self):
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         self.x = (sw - CANVAS_W) // 2
-        self.y = sh - CANVAS_H - 40
+        self.y = sh - CANVAS_H - self.FLOOR_MARGIN
         self.root.geometry(f"+{self.x}+{self.y}")
 
     # =====================================================================
