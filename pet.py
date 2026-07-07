@@ -135,6 +135,9 @@ TRANSPARENT = "#010101"
 # the Windows taskbar (typically 40-48 px; 60 gives some breathing room).
 FLOOR_MARGIN = 60
 
+# Horizontal gap between pet windows when multiple opencode instances run.
+PET_GAP = 20
+
 PET_CX = CANVAS_W // 2
 PET_CY = 160
 
@@ -202,8 +205,87 @@ HEART_PINK  = "#FF6B95"
 HEART_LITE  = "#FFB6C1"
 
 
+# ---------------------------------------------------------------------------
+# Instance slot manager — assign each pet a horizontal slot so multiple
+# opencode windows don't overlap. Uses a file-based registry in the same dir.
+# ---------------------------------------------------------------------------
+
+def _registry_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".instances")
+
+
+def acquire_slot():
+    """Atomically claim the next available slot index (0-based).
+
+    Returns (slot, slot_token). slot_token is the PID written to the file so
+    release_slot() can reliably remove only our own entry.
+    """
+    path = _registry_path()
+    my_pid = os.getpid()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            entries = [int(line.strip()) for line in f if line.strip().isdigit()]
+    except (FileNotFoundError, ValueError, OSError):
+        entries = []
+    # prune dead PIDs (best-effort, Windows-only)
+    if sys.platform == "win32":
+        entries = [p for p in entries if _pid_alive(p)]
+    slot = len(entries)
+    entries.append(my_pid)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            for p in entries:
+                f.write(f"{p}\n")
+    except OSError:
+        pass
+    return slot, my_pid
+
+
+def release_slot(token):
+    """Remove our PID from the registry file (best-effort)."""
+    path = _registry_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            entries = [int(line.strip()) for line in f if line.strip().isdigit()]
+    except (FileNotFoundError, ValueError, OSError):
+        return
+    entries = [p for p in entries if p != token]
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            for p in entries:
+                f.write(f"{p}\n")
+    except OSError:
+        pass
+
+
+def _pid_alive(pid):
+    """Check if a PID is still running on Windows (best-effort)."""
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        h = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            ok = ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+            if not ok:
+                return False
+            return code.value == STILL_ACTIVE
+        finally:
+            ctypes.windll.kernel32.CloseHandle(h)
+    except Exception:
+        return True  # assume alive to avoid clobbering others
+
+
 class PetWindow:
     def __init__(self):
+        # Claim a horizontal slot so multiple opencode windows don't overlap.
+        self.slot, self.slot_token = acquire_slot()
+
         self.root = tk.Tk()
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
@@ -211,7 +293,9 @@ class PetWindow:
         self.root.config(bg=TRANSPARENT)
 
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        self.x = sw - CANVAS_W - 60
+        # Each instance shifts left by (CANVAS_W + PET_GAP) pixels.
+        slot_offset = self.slot * (CANVAS_W + PET_GAP)
+        self.x = sw - CANVAS_W - 60 - slot_offset
         # Lift the pet above the Windows taskbar (typically 40-48 px tall).
         self.y = sh - CANVAS_H - FLOOR_MARGIN
         self.root.geometry(f"{CANVAS_W}x{CANVAS_H}+{self.x}+{self.y}")
@@ -760,7 +844,11 @@ def main():
     t = threading.Thread(target=stdin_loop, args=(pet,), daemon=True)
     t.start()
     pet.step()
-    pet.root.mainloop()
+    try:
+        pet.root.mainloop()
+    finally:
+        # Release our slot so the next pet can reuse our horizontal position.
+        release_slot(pet.slot_token)
 
 
 if __name__ == "__main__":

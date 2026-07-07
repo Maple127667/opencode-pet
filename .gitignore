@@ -2,6 +2,9 @@
 probe.log
 *.log
 
+# Multi-instance slot registry (per-PID file, regenerated on each spawn)
+.instances
+
 # Python
 __pycache__/
 *.py[cod]
