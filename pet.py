@@ -213,8 +213,7 @@ class PetWindow:
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         self.x = sw - CANVAS_W - 60
         # Lift the pet above the Windows taskbar (typically 40-48 px tall).
-        # FLOOR_MARGIN is the gap from the bottom of the work area.
-        self.y = sh - CANVAS_H - self.FLOOR_MARGIN
+        self.y = sh - CANVAS_H - FLOOR_MARGIN
         self.root.geometry(f"{CANVAS_W}x{CANVAS_H}+{self.x}+{self.y}")
 
         # Mark the window as "no-activate" so it NEVER steals keyboard focus.
