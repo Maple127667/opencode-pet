@@ -43,46 +43,39 @@ index.js (TUI 插件)                    pet.py (tkinter 窗口)
 
 ## 安装
 
-### 方式一：全局插件（推荐）
+> **关于 plugins 目录的说明**：opencode 官方文档提到 `~/.config/opencode/plugins/` 目录会自动加载插件，但**这只适用于标准 plugin hooks**（`event`、`tool.execute.before` 等）。TUI 插件（`export default { tui }`）目前只能通过 `tui.json` 的 `plugin` 数组加载，plugins 目录不会识别。
 
-克隆到 opencode 的全局插件目录：
-
-```bash
-# Windows
-git clone https://github.com/Maple127667/opencode-pet.git "%USERPROFILE%\.config\opencode\plugins\opencode-pet"
-
-# macOS / Linux
-git clone https://github.com/Maple127667/opencode-pet.git ~/.config/opencode/plugins/opencode-pet
-```
-
-然后在同一目录创建一个入口 JS 文件指向插件的 `index.js`。
-
-`~/.config/opencode/plugins/opencode-pet.js`：
-
-```js
-export { default } from "./opencode-pet/index.js";
-export { default as tui } from "./opencode-pet/index.js";
-```
-
-opencode 启动时会自动加载 `~/.config/opencode/plugins/` 目录下的 `.js` / `.ts` 文件。
-
-### 方式二：项目级插件
-
-把插件放到项目根目录的 `.opencode/plugins/`：
+### 1. 克隆插件
 
 ```bash
-cd <你的项目>
-git clone https://github.com/Maple127667/opencode-pet.git .opencode/plugins/opencode-pet
+# 任意位置，例如 ~/projects/
+git clone https://github.com/Maple127667/opencode-pet.git
 ```
 
-同样创建一个入口 JS 文件 `.opencode/plugins/opencode-pet.js`：
+### 2. 在 tui.json 中注册
 
-```js
-export { default } from "./opencode-pet/index.js";
-export { default as tui } from "./opencode-pet/index.js";
+编辑 `~/.config/opencode/tui.json`（Windows 下为 `C:\Users\<用户名>\.config\opencode\tui.json`），在 `plugin` 数组里加入插件路径：
+
+```json
+{
+  "plugin": [
+    "file:/path/to/opencode-pet"
+  ]
+}
 ```
 
-### 重启 opencode
+如果已有其他插件，追加到数组末尾即可：
+
+```json
+{
+  "plugin": [
+    "other-plugin@latest",
+    "file:/path/to/opencode-pet"
+  ]
+}
+```
+
+### 3. 重启 opencode
 
 桌宠会在屏幕右下角出现。发一条消息，猫会跑进来、审视、说话时跑动，完成后挥手庆祝。
 
