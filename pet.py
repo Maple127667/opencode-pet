@@ -93,6 +93,34 @@ if sys.platform == "win32":
 
     _kernel32 = ctypes.windll.kernel32
 
+    # --- EnumWindows callback (module-level to avoid GC) ---
+    # ctypes callbacks MUST be kept alive as long as EnumWindows might use
+    # them. A local-scope _ENUMPROC(_cb) gets GC'd mid-enumeration.
+    _enum_found = [None]
+    _enum_target_pid = [0]
+
+    def _enum_cb_impl(hwnd, _lparam):
+        if _user32.IsWindowVisible(hwnd):
+            wpid = wintypes.DWORD()
+            _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+            if wpid.value == _enum_target_pid[0]:
+                title = ctypes.create_unicode_buffer(256)
+                _user32.GetWindowTextW(hwnd, title, 256)
+                if title.value:
+                    _enum_found[0] = hwnd
+                    return False  # stop enumeration
+        return True
+
+    _ENUMPROC_TYPE = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    _enum_proc = _ENUMPROC_TYPE(_enum_cb_impl)
+
+    def _find_window_by_pid(pid):
+        """Find the visible top-level window owned by `pid`. Returns HWND or None."""
+        _enum_found[0] = None
+        _enum_target_pid[0] = pid
+        _user32.EnumWindows(_enum_proc, 0)
+        return _enum_found[0]
+
     def _find_ancestor_window(pid):
         """Walk up the process tree from `pid` and return the HWND of the
         first ancestor that owns a visible top-level window with a title
@@ -113,26 +141,16 @@ if sys.platform == "win32":
                         break
             _kernel32.CloseHandle(snap)
 
+        sys.stderr.write(f"[pet] process tree: walking from pid={pid}\n")
         # Walk up from pid, checking each ancestor for a visible window
         current = pid
         visited = set()
-        _ENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
         while current and current not in visited:
             visited.add(current)
-            found = [None]
-            def _cb(hwnd, _lparam, _cpid=current):
-                wpid = wintypes.DWORD()
-                _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
-                if wpid.value == _cpid and _user32.IsWindowVisible(hwnd):
-                    title = ctypes.create_unicode_buffer(256)
-                    _user32.GetWindowTextW(hwnd, title, 256)
-                    if title.value:
-                        found[0] = hwnd
-                        return False  # stop enumeration
-                return True
-            _user32.EnumWindows(_ENUMPROC(_cb), 0)
-            if found[0]:
-                return found[0]
+            hwnd = _find_window_by_pid(current)
+            sys.stderr.write(f"[pet]   pid={current} hwnd={hwnd}\n")
+            if hwnd:
+                return hwnd
             current = parent_map.get(current)
         return None
 
@@ -469,6 +487,9 @@ class PetWindow:
         self._last_click_time = 0.0
         # PID of the opencode process that spawned us (for terminal focus).
         self.term_pid = None
+        # Cached terminal window HWND — found once at startup when term_pid
+        # arrives, then reused on double-click. Avoids fragile late lookup.
+        self.term_hwnd = None
 
         # ---- Physics (constants in 100ms-step units; dt-scaled at runtime) ----
         # New pet is launched: spawn off-screen right with leftward + upward
@@ -922,20 +943,21 @@ class PetWindow:
     def _focus_terminal(self):
         """Double-click: bring the parent terminal window to the foreground.
 
-        Walks up the process tree from self.term_pid (the opencode PID that
-        spawned us) to find the first ancestor with a visible top-level
-        window (the terminal host: WindowsTerminal.exe, cmd.exe, etc.),
-        then uses SetForegroundWindow + AttachThreadInput to activate it.
+        Uses the cached HWND found at startup (when term_pid arrived).
         """
-        if sys.platform != "win32" or not self.term_pid:
+        if sys.platform != "win32":
+            return
+        if not self.term_hwnd:
+            sys.stderr.write(f"[pet] focus: no cached term_hwnd (term_pid={self.term_pid})\n")
+            sys.stderr.flush()
             return
         try:
-            hwnd = _find_ancestor_window(self.term_pid)
-            if not hwnd:
-                sys.stderr.write(f"[pet] focus: no window found for pid={self.term_pid}\n")
-                return
-            _bring_window_to_front(hwnd)
-            sys.stderr.write(f"[pet] focus: activated hwnd={hwnd}\n")
+            _bring_window_to_front(self.term_hwnd)
+            sys.stderr.write(f"[pet] focus: activated hwnd={self.term_hwnd}\n")
+            sys.stderr.flush()
+        except Exception as e:
+            sys.stderr.write(f"[pet] focus error: {e}\n")
+            sys.stderr.flush()
         except Exception as e:
             sys.stderr.write(f"[pet] focus error: {e}\n")
 
@@ -1032,8 +1054,21 @@ def stdin_loop(pet: PetWindow):
             pet.root.after(0, pet.root.destroy)
             break
         elif t == "term_pid":
-            pet.term_pid = int(msg.get("pid", 0)) or None
-            sys.stderr.write(f"[pet] term_pid={pet.term_pid}\n")
+            pid = int(msg.get("pid", 0)) or None
+            pet.term_pid = pid
+            sys.stderr.write(f"[pet] term_pid={pid}\n")
+            # Find and cache the terminal window NOW (at startup), not at
+            # double-click time. The terminal is reliably findable right
+            # now because it's in the foreground.
+            if pid and sys.platform == "win32":
+                hwnd = _find_ancestor_window(pid)
+                if hwnd:
+                    pet.term_hwnd = hwnd
+                    title = ctypes.create_unicode_buffer(256)
+                    _user32.GetWindowTextW(hwnd, title, 256)
+                    sys.stderr.write(f"[pet] cached term_hwnd={hwnd} title='{title.value}'\n")
+                else:
+                    sys.stderr.write(f"[pet] WARNING: no terminal window found for pid={pid}\n")
             sys.stderr.flush()
 
 
