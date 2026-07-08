@@ -189,7 +189,10 @@ const tui = async (api) => {
       }
       // For soft idle (poke fallback) we DO NOT touch sessionBusy/busySince/
       // taskCost — the task may still be running, just quiet between steps.
-      send({ type: "status", value: "idle" });
+  send({ type: "status", value: "idle" });
+  // Send the opencode process PID so the pet can find and focus the
+  // parent terminal window when double-clicked.
+  send({ type: "term_pid", pid: process.pid });
     }
   };
 

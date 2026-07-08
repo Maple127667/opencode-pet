@@ -67,12 +67,97 @@ if sys.platform == "win32":
     _WS_EX_TOOLWINDOW   = 0x00000080
 
     _SW_HIDE            = 0
+    _SW_RESTORE         = 9
     _SWP_NOSIZE         = 0x0001
     _SWP_NOMOVE         = 0x0002
     _SWP_NOZORDER       = 0x0004
     _SWP_NOACTIVATE     = 0x0010
     _SWP_FRAMECHANGED   = 0x0020
     _SWP_SHOWWINDOW     = 0x0040
+
+    _TH32CS_SNAPPROCESS = 0x00000002
+
+    class _PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize",              wintypes.DWORD),
+            ("cntUsage",            wintypes.DWORD),
+            ("th32ProcessID",       wintypes.DWORD),
+            ("th32DefaultHeapID",   ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID",        wintypes.DWORD),
+            ("cntThreads",          wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase",      ctypes.c_long),
+            ("dwFlags",             wintypes.DWORD),
+            ("szExeFile",           ctypes.c_wchar * 260),
+        ]
+
+    _kernel32 = ctypes.windll.kernel32
+
+    def _find_ancestor_window(pid):
+        """Walk up the process tree from `pid` and return the HWND of the
+        first ancestor that owns a visible top-level window with a title
+        (the terminal host: WindowsTerminal.exe, cmd.exe, etc.).
+
+        Returns HWND (int) or None.
+        """
+        # Build PID → parent-PID map from a process snapshot
+        parent_map = {}
+        snap = _kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+        if snap:
+            pe = _PROCESSENTRY32W()
+            pe.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+            if _kernel32.Process32FirstW(snap, ctypes.byref(pe)):
+                while True:
+                    parent_map[pe.th32ProcessID] = pe.th32ParentProcessID
+                    if not _kernel32.Process32NextW(snap, ctypes.byref(pe)):
+                        break
+            _kernel32.CloseHandle(snap)
+
+        # Walk up from pid, checking each ancestor for a visible window
+        current = pid
+        visited = set()
+        _ENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        while current and current not in visited:
+            visited.add(current)
+            found = [None]
+            def _cb(hwnd, _lparam, _cpid=current):
+                wpid = wintypes.DWORD()
+                _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+                if wpid.value == _cpid and _user32.IsWindowVisible(hwnd):
+                    title = ctypes.create_unicode_buffer(256)
+                    _user32.GetWindowTextW(hwnd, title, 256)
+                    if title.value:
+                        found[0] = hwnd
+                        return False  # stop enumeration
+                return True
+            _user32.EnumWindows(_ENUMPROC(_cb), 0)
+            if found[0]:
+                return found[0]
+            current = parent_map.get(current)
+        return None
+
+    def _bring_window_to_front(hwnd):
+        """Activate a window from a non-foreground process.
+
+        Windows blocks SetForegroundWindow unless the caller is already the
+        foreground process. We bypass this with AttachThreadInput, which
+        temporarily attaches our input thread to the target's, making us
+        eligible to call SetForegroundWindow.
+        """
+        fg_hwnd = _user32.GetForegroundWindow()
+        fg_tid = _user32.GetWindowThreadProcessId(fg_hwnd, None)
+        target_tid = _user32.GetWindowThreadProcessId(hwnd, None)
+
+        # Restore if minimized
+        if _user32.IsIconic(hwnd):
+            _user32.ShowWindow(hwnd, _SW_RESTORE)
+
+        if fg_tid != target_tid:
+            _user32.AttachThreadInput(fg_tid, target_tid, True)
+        _user32.SetForegroundWindow(hwnd)
+        _user32.BringWindowToTop(hwnd)
+        if fg_tid != target_tid:
+            _user32.AttachThreadInput(fg_tid, target_tid, False)
 
     def _mark_window_no_activate(hwnd):
         """Mark window so it never gets activated (no keyboard focus).
@@ -262,10 +347,12 @@ def acquire_slot():
 def compute_slot(my_pid):
     """Return the current slot index (0-based) for my_pid.
 
-    Slot = position of my_pid in the sorted list of live PIDs.
-    Pets always compact toward slot 0 (rightmost) when others close.
+    Slot = position of my_pid in the live-PID list, ordered by **startup
+    time** (the order PIDs were appended to the registry file). The oldest
+    pet (earliest startup) is slot 0 = rightmost; newer pets get higher
+    slots and appear further left.
     """
-    pids = sorted(_read_live_pids())
+    pids = _read_live_pids()   # already in startup order (append order)
     try:
         return pids.index(my_pid)
     except ValueError:
@@ -274,7 +361,7 @@ def compute_slot(my_pid):
         if my_pid not in pids:
             pids.append(my_pid)
             _write_pids(pids)
-        return sorted(pids).index(my_pid)
+        return pids.index(my_pid)
 
 
 def release_slot(token):
@@ -323,10 +410,17 @@ class PetWindow:
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         # Each instance shifts left by (CANVAS_W + PET_GAP) pixels.
         slot_offset = self.slot * (CANVAS_W + PET_GAP)
-        self.x = sw - CANVAS_W - 60 - slot_offset
+        # Final resting position (home). Pet does NOT spawn here — it is
+        # thrown in from off-screen right and walks to home after landing.
+        self.home_x = sw - CANVAS_W - 60 - slot_offset
         # Lift the pet above the Windows taskbar (typically 40-48 px tall).
-        self.y = sh - CANVAS_H - FLOOR_MARGIN
-        self.root.geometry(f"{CANVAS_W}x{CANVAS_H}+{self.x}+{self.y}")
+        self.home_y = sh - CANVAS_H - FLOOR_MARGIN
+        # Spawn off-screen right at ground level, then throw it leftward
+        # with an upward velocity so it arcs in (physics engine handles the
+        # trajectory + bounces; _maybe_go_home walks it to home_x after landing).
+        self.x = sw + 40
+        self.y = self.home_y
+        self.root.geometry(f"{CANVAS_W}x{CANVAS_H}+{int(self.x)}+{int(self.y)}")
 
         # Mark the window as "no-activate" so it NEVER steals keyboard focus.
         # This must happen AFTER geometry is set but BEFORE mainloop() runs
@@ -355,7 +449,8 @@ class PetWindow:
         self.canvas.bind("<ButtonPress-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
-        self.canvas.bind("<Double-Button-1>", self._on_pet)
+        # Single click (detected on release if not dragged) → hearts.
+        # Double click → focus the parent terminal window.
         self.canvas.bind("<ButtonPress-3>", lambda _e: self.clear_alert())
 
         # ---- Load sprite frames --------------------------------------
@@ -366,11 +461,22 @@ class PetWindow:
         # ---- Interaction / drag state --------------------------------
         self.dragging = False
         self.drag_offset = (0, 0)
+        # Click detection: track press position + last click time so we can
+        # distinguish single-click (hearts) vs double-click (focus terminal)
+        # from drag (physics throw) in _on_release.
+        self._press_x = 0
+        self._press_y = 0
+        self._last_click_time = 0.0
+        # PID of the opencode process that spawned us (for terminal focus).
+        self.term_pid = None
 
         # ---- Physics (constants in 100ms-step units; dt-scaled at runtime) ----
-        self.vx = 0                # px per step
-        self.vy = 0
-        self.falling = False
+        # New pet is launched: spawn off-screen right with leftward + upward
+        # velocity. Physics engine arcs it in; bounces; _maybe_go_home walks
+        # it to home_x after it comes to rest.
+        self.vx = -26            # px per step — throw leftward (toward home)
+        self.vy = -16            # px per step — initial upward kick for an arc
+        self.falling = True      # start airborne so physics runs immediately
         self._drag_hist = []
         self.GRAVITY = 4.0         # px per step² (was 2.2 — heavier fall)
         self.AIR_DRAG = 0.045      # per step — velocity bleed in flight (terminal velocity feel)
@@ -393,8 +499,9 @@ class PetWindow:
         self.bubble_until = 0.0
 
         self.frame_idx = 0
-        self.home_x = self.x       # fixed: bottom-right corner, never updated on drag
-        self.home_y = self.y
+        # home_x/home_y already set in __init__ (slot-based bottom-right).
+        # Do NOT overwrite with self.x — that is the spawn point (off-screen
+        # right), not the home target.
         self.moving_home = False   # True while walking back to home corner
         self._busy_since = 0.0     # when busy started (for run→review→work transition)
         # activity channel: "idle" | "thinking" | "speaking" | "tool"
@@ -719,9 +826,9 @@ class PetWindow:
         if self.x < 0:
             self.x = 0
             self.vx = -self.vx * self.BOUNCE
-        elif self.x > sw - CANVAS_W:
-            self.x = sw - CANVAS_W
-            self.vx = -self.vx * self.BOUNCE
+        # NOTE: no right-edge clamp — allows new pets to be thrown in from
+        # off-screen right. After landing, _maybe_go_home walks them to
+        # home_x (which is always on-screen).
         # NOTE: geometry() committed in render branch, not here
 
     def _maybe_go_home(self, steps):
@@ -751,6 +858,8 @@ class PetWindow:
         self.vx, self.vy = 0, 0
         self.drag_offset = (e.x_root - self.x, e.y_root - self.y)
         self._drag_hist = [(time.time(), self.x, self.y)]
+        self._press_x = e.x_root
+        self._press_y = e.y_root
 
     def _on_drag(self, e):
         if not self.dragging:
@@ -764,9 +873,28 @@ class PetWindow:
         while len(self._drag_hist) > 2 and self._drag_hist[0][0] < cutoff:
             self._drag_hist.pop(0)
 
-    def _on_release(self, _e):
+    def _on_release(self, e):
         self.dragging = False
-        # home is fixed at bottom-right corner, don't update it on drag release
+        # --- Click vs drag detection ---
+        # If the mouse barely moved between press and release, treat it as
+        # a click (not a drag). Then single-click → hearts, double-click →
+        # focus the parent terminal.
+        dx = e.x_root - self._press_x
+        dy = e.y_root - self._press_y
+        if abs(dx) < 6 and abs(dy) < 6:
+            # It's a click, not a drag
+            now = time.time()
+            if now - self._last_click_time < 0.35:
+                # Double click → focus terminal
+                self._last_click_time = 0.0
+                self._focus_terminal()
+            else:
+                # Single click → hearts + little hop
+                self._last_click_time = now
+                self._pet()
+            self._drag_hist = []
+            return
+        # --- Drag: apply throw physics ---
         self._drag_hist.append((time.time(), self.x, self.y))
         if len(self._drag_hist) >= 2:
             t0, x0, y0 = self._drag_hist[0]
@@ -784,11 +912,32 @@ class PetWindow:
                     self.falling = True
         self._drag_hist = []
 
-    def _on_pet(self, _e):
+    def _pet(self):
+        """Single-click: show hearts + little hop."""
         self.petted_until = time.time() + self.PET_HEARTS_MS / 1000.0
         if not self.falling and not self.dragging:
             self.vy = -6
             self.falling = True
+
+    def _focus_terminal(self):
+        """Double-click: bring the parent terminal window to the foreground.
+
+        Walks up the process tree from self.term_pid (the opencode PID that
+        spawned us) to find the first ancestor with a visible top-level
+        window (the terminal host: WindowsTerminal.exe, cmd.exe, etc.),
+        then uses SetForegroundWindow + AttachThreadInput to activate it.
+        """
+        if sys.platform != "win32" or not self.term_pid:
+            return
+        try:
+            hwnd = _find_ancestor_window(self.term_pid)
+            if not hwnd:
+                sys.stderr.write(f"[pet] focus: no window found for pid={self.term_pid}\n")
+                return
+            _bring_window_to_front(hwnd)
+            sys.stderr.write(f"[pet] focus: activated hwnd={hwnd}\n")
+        except Exception as e:
+            sys.stderr.write(f"[pet] focus error: {e}\n")
 
     # =====================================================================
     # Master loop (120 Hz physics, 60 Hz render, 12 Hz GIF advance)
@@ -882,6 +1031,10 @@ def stdin_loop(pet: PetWindow):
         elif t == "quit":
             pet.root.after(0, pet.root.destroy)
             break
+        elif t == "term_pid":
+            pet.term_pid = int(msg.get("pid", 0)) or None
+            sys.stderr.write(f"[pet] term_pid={pet.term_pid}\n")
+            sys.stderr.flush()
 
 
 def slot_watcher_loop(pet: PetWindow):
