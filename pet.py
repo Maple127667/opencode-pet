@@ -668,14 +668,12 @@ class PetWindow:
     # =====================================================================
 
     def _update_slot_position(self):
-        """Recompute our slot index and slide the window if it changed.
+        """Recompute our slot index and update home_x.
 
-        Called periodically by the slot_watcher thread (via root.after).
-        When another pet closes, remaining pets compact toward slot 0
-        (rightmost) to fill the gap.
+        Does NOT move the window directly — just sets a new home target.
+        The existing _maybe_go_home() physics routine walks the pet there
+        smoothly at 7 px/step (jumping.gif while moving).
         """
-        if self.dragging or self.falling:
-            return  # don't fight the user / physics
         new_slot = compute_slot(self.slot_token)
         if new_slot == self.slot:
             return
@@ -683,10 +681,8 @@ class PetWindow:
         sw = self.root.winfo_screenwidth()
         slot_offset = self.slot * (CANVAS_W + PET_GAP)
         self.home_x = sw - CANVAS_W - 60 - slot_offset
-        # Only re-apply x if we're resting at home (not mid-drag/fall)
-        if not self.moving_home:
-            self.x = self.home_x
-            self.root.geometry(f"+{int(self.x)}+{int(self.y)}")
+        # _maybe_go_home will pick up the new home_x on the next physics step
+        # and walk the pet there. No instant teleport.
 
     def _physics_step(self, steps):
         if not self.falling or self.dragging or steps <= 0:
