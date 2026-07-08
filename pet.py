@@ -214,48 +214,74 @@ def _registry_path():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".instances")
 
 
-def acquire_slot():
-    """Atomically claim the next available slot index (0-based).
-
-    Returns (slot, slot_token). slot_token is the PID written to the file so
-    release_slot() can reliably remove only our own entry.
-    """
+def _read_live_pids():
+    """Read the registry and return only alive PIDs (deduplicated)."""
     path = _registry_path()
-    my_pid = os.getpid()
     try:
         with open(path, "r", encoding="utf-8") as f:
-            entries = [int(line.strip()) for line in f if line.strip().isdigit()]
+            pids = [int(line.strip()) for line in f if line.strip().isdigit()]
     except (FileNotFoundError, ValueError, OSError):
-        entries = []
+        return []
     # prune dead PIDs (best-effort, Windows-only)
     if sys.platform == "win32":
-        entries = [p for p in entries if _pid_alive(p)]
-    slot = len(entries)
-    entries.append(my_pid)
+        pids = [p for p in pids if _pid_alive(p)]
+    # dedupe preserving order
+    seen = set()
+    unique = []
+    for p in pids:
+        if p not in seen:
+            seen.add(p)
+            unique.append(p)
+    return unique
+
+
+def _write_pids(pids):
+    path = _registry_path()
     try:
         with open(path, "w", encoding="utf-8") as f:
-            for p in entries:
+            for p in pids:
                 f.write(f"{p}\n")
     except OSError:
         pass
-    return slot, my_pid
+
+
+def acquire_slot():
+    """Register our PID in the instance file.
+
+    Returns our PID. The actual slot index is computed dynamically by
+    compute_slot() so positions re-compact when other pets close.
+    """
+    my_pid = os.getpid()
+    pids = _read_live_pids()
+    if my_pid not in pids:
+        pids.append(my_pid)
+    _write_pids(pids)
+    return my_pid
+
+
+def compute_slot(my_pid):
+    """Return the current slot index (0-based) for my_pid.
+
+    Slot = position of my_pid in the sorted list of live PIDs.
+    Pets always compact toward slot 0 (rightmost) when others close.
+    """
+    pids = sorted(_read_live_pids())
+    try:
+        return pids.index(my_pid)
+    except ValueError:
+        # we're not in the file (shouldn't happen) — re-register
+        pids = _read_live_pids()
+        if my_pid not in pids:
+            pids.append(my_pid)
+            _write_pids(pids)
+        return sorted(pids).index(my_pid)
 
 
 def release_slot(token):
     """Remove our PID from the registry file (best-effort)."""
-    path = _registry_path()
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            entries = [int(line.strip()) for line in f if line.strip().isdigit()]
-    except (FileNotFoundError, ValueError, OSError):
-        return
-    entries = [p for p in entries if p != token]
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            for p in entries:
-                f.write(f"{p}\n")
-    except OSError:
-        pass
+    my_pid = token
+    pids = [p for p in _read_live_pids() if p != my_pid]
+    _write_pids(pids)
 
 
 def _pid_alive(pid):
@@ -283,8 +309,10 @@ def _pid_alive(pid):
 
 class PetWindow:
     def __init__(self):
-        # Claim a horizontal slot so multiple opencode windows don't overlap.
-        self.slot, self.slot_token = acquire_slot()
+        # Register our PID. Actual slot is computed dynamically so positions
+        # re-compact (shift right) when other pets close.
+        self.slot_token = acquire_slot()
+        self.slot = compute_slot(self.slot_token)
 
         self.root = tk.Tk()
         self.root.overrideredirect(True)
@@ -639,6 +667,27 @@ class PetWindow:
     # Physics & wander (dt-scaled; constants in 100ms-step units)
     # =====================================================================
 
+    def _update_slot_position(self):
+        """Recompute our slot index and slide the window if it changed.
+
+        Called periodically by the slot_watcher thread (via root.after).
+        When another pet closes, remaining pets compact toward slot 0
+        (rightmost) to fill the gap.
+        """
+        if self.dragging or self.falling:
+            return  # don't fight the user / physics
+        new_slot = compute_slot(self.slot_token)
+        if new_slot == self.slot:
+            return
+        self.slot = new_slot
+        sw = self.root.winfo_screenwidth()
+        slot_offset = self.slot * (CANVAS_W + PET_GAP)
+        self.home_x = sw - CANVAS_W - 60 - slot_offset
+        # Only re-apply x if we're resting at home (not mid-drag/fall)
+        if not self.moving_home:
+            self.x = self.home_x
+            self.root.geometry(f"+{int(self.x)}+{int(self.y)}")
+
     def _physics_step(self, steps):
         if not self.falling or self.dragging or steps <= 0:
             return
@@ -839,10 +888,26 @@ def stdin_loop(pet: PetWindow):
             break
 
 
+def slot_watcher_loop(pet: PetWindow):
+    """Background thread: poll .instances every 500ms and reposition the pet
+    if its slot index changed (e.g. another pet closed).
+
+    Uses root.after() to marshal geometry updates back to the Tk main thread.
+    """
+    while True:
+        time.sleep(0.5)
+        try:
+            pet.root.after(0, pet._update_slot_position)
+        except Exception:
+            break  # window destroyed
+
+
 def main():
     pet = PetWindow()
-    t = threading.Thread(target=stdin_loop, args=(pet,), daemon=True)
-    t.start()
+    t1 = threading.Thread(target=stdin_loop, args=(pet,), daemon=True)
+    t1.start()
+    t2 = threading.Thread(target=slot_watcher_loop, args=(pet,), daemon=True)
+    t2.start()
     pet.step()
     try:
         pet.root.mainloop()
