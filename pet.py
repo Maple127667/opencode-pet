@@ -469,7 +469,14 @@ class PetWindow:
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
         # Single click (detected on release if not dragged) → hearts.
         # Double click → focus the parent terminal window.
-        self.canvas.bind("<ButtonPress-3>", lambda _e: self.clear_alert())
+        self.canvas.bind("<ButtonPress-3>", self._on_right_click)
+
+        # ---- Right-click context menu ---------------------------------
+        self.menu = tk.Menu(self.root, tearoff=0)
+        self.menu.add_command(label="跳转终端", command=self._focus_terminal)
+        self.menu.add_separator()
+        self.menu.add_command(label="清除提示", command=self.clear_alert)
+        self.menu.add_command(label="退出", command=self.root.destroy)
 
         # ---- Load sprite frames --------------------------------------
         self.gifs = {}
@@ -479,12 +486,10 @@ class PetWindow:
         # ---- Interaction / drag state --------------------------------
         self.dragging = False
         self.drag_offset = (0, 0)
-        # Click detection: track press position + last click time so we can
-        # distinguish single-click (hearts) vs double-click (focus terminal)
-        # from drag (physics throw) in _on_release.
+        # Click detection: track press position so we can distinguish
+        # single-click (hearts) from drag (physics throw) in _on_release.
         self._press_x = 0
         self._press_y = 0
-        self._last_click_time = 0.0
         # PID of the opencode process that spawned us (for terminal focus).
         self.term_pid = None
         # Cached terminal window HWND — found once at startup when term_pid
@@ -898,21 +903,11 @@ class PetWindow:
         self.dragging = False
         # --- Click vs drag detection ---
         # If the mouse barely moved between press and release, treat it as
-        # a click (not a drag). Then single-click → hearts, double-click →
-        # focus the parent terminal.
+        # a single click → hearts. (Drag → physics throw. Right-click → menu.)
         dx = e.x_root - self._press_x
         dy = e.y_root - self._press_y
         if abs(dx) < 6 and abs(dy) < 6:
-            # It's a click, not a drag
-            now = time.time()
-            if now - self._last_click_time < 0.35:
-                # Double click → focus terminal
-                self._last_click_time = 0.0
-                self._focus_terminal()
-            else:
-                # Single click → hearts + little hop
-                self._last_click_time = now
-                self._pet()
+            self._pet()
             self._drag_hist = []
             return
         # --- Drag: apply throw physics ---
@@ -940,8 +935,15 @@ class PetWindow:
             self.vy = -6
             self.falling = True
 
+    def _on_right_click(self, e):
+        """Right-click: show context menu at cursor position."""
+        try:
+            self.menu.tk_popup(e.x_root, e.y_root)
+        finally:
+            self.menu.grab_release()
+
     def _focus_terminal(self):
-        """Double-click: bring the parent terminal window to the foreground.
+        """Menu action: bring the parent terminal window to the foreground.
 
         Uses the cached HWND found at startup (when term_pid arrived).
         """
