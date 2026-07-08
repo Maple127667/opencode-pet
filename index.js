@@ -84,6 +84,9 @@ const tui = async (api) => {
   };
 
   send({ type: "status", value: "idle" });
+  // Send the opencode process PID so the pet can find and focus the
+  // parent terminal window via right-click menu.
+  send({ type: "term_pid", pid: process.pid });
 
   // ---- state helpers --------------------------------------------------
   let totalCost = 0;

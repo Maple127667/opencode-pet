@@ -948,9 +948,13 @@ class PetWindow:
         Uses the cached HWND found at startup (when term_pid arrived).
         """
         if sys.platform != "win32":
+            sys.stderr.write("[pet] focus: not win32, skip\n")
+            sys.stderr.flush()
             return
+        sys.stderr.write(f"[pet] focus called: term_pid={self.term_pid} term_hwnd={self.term_hwnd}\n")
+        sys.stderr.flush()
         if not self.term_hwnd:
-            sys.stderr.write(f"[pet] focus: no cached term_hwnd (term_pid={self.term_pid})\n")
+            sys.stderr.write(f"[pet] focus: no cached term_hwnd (term_pid={self.term_pid}) — cannot focus\n")
             sys.stderr.flush()
             return
         try:
@@ -960,8 +964,6 @@ class PetWindow:
         except Exception as e:
             sys.stderr.write(f"[pet] focus error: {e}\n")
             sys.stderr.flush()
-        except Exception as e:
-            sys.stderr.write(f"[pet] focus error: {e}\n")
 
     # =====================================================================
     # Master loop (120 Hz physics, 60 Hz render, 12 Hz GIF advance)
